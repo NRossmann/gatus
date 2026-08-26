@@ -2823,7 +2823,9 @@ Confused? Read [Securing Gatus with OIDC using Auth0](https://twin.sh/articles/5
 
 In addition to the browser-based login flow, the API also accepts a bearer token obtained directly from the OIDC
 provider (e.g. `Authorization: Bearer <token>`). The token is validated against the provider (using its JWKS for ID
-tokens, or its UserInfo endpoint for opaque access tokens) and, if valid, cached locally until it expires.
+tokens, or its UserInfo endpoint for opaque access tokens) and, if valid, cached locally: ID tokens are cached for
+up to their own expiry (capped by `session-ttl`), while opaque access tokens, whose expiry Gatus cannot inspect, are
+cached for a short fixed duration instead.
 
 
 ### TLS Encryption

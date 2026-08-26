@@ -114,6 +114,26 @@ func TestOIDCConfig_ValidateBearerToken(t *testing.T) {
 	}
 }
 
+func TestMinDuration(t *testing.T) {
+	scenarios := []struct {
+		Name     string
+		A, B     time.Duration
+		Expected time.Duration
+	}{
+		{Name: "a-smaller", A: time.Minute, B: time.Hour, Expected: time.Minute},
+		{Name: "b-smaller", A: time.Hour, B: time.Minute, Expected: time.Minute},
+		{Name: "equal", A: time.Minute, B: time.Minute, Expected: time.Minute},
+		{Name: "negative-a", A: -time.Minute, B: time.Hour, Expected: -time.Minute},
+	}
+	for _, scenario := range scenarios {
+		t.Run(scenario.Name, func(t *testing.T) {
+			if result := minDuration(scenario.A, scenario.B); result != scenario.Expected {
+				t.Errorf("expected %v, got %v", scenario.Expected, result)
+			}
+		})
+	}
+}
+
 func TestOIDCConfig_setSessionCookie(t *testing.T) {
 	c := &OIDCConfig{}
 	responseRecorder := httptest.NewRecorder()

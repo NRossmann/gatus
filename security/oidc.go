@@ -19,6 +19,12 @@ const (
 	// bearerTokenValidationTimeout bounds how long a request may block while a bearer token that isn't already
 	// cached locally is validated against the OIDC provider (JWKS or UserInfo endpoint).
 	bearerTokenValidationTimeout = 10 * time.Second
+
+	// opaqueAccessTokenCacheTTL is the maximum time an opaque access token (i.e. one validated through the
+	// UserInfo endpoint rather than as a JWT) is cached locally. Unlike ID tokens, the OIDC spec doesn't guarantee
+	// access tokens carry an inspectable expiry, so a short, fixed TTL is used instead of trusting SessionTTL, to
+	// limit how long a token that was since revoked or expired at the provider keeps working against Gatus.
+	opaqueAccessTokenCacheTTL = 5 * time.Minute
 )
 
 // OIDCConfig is the configuration for OIDC authentication
@@ -154,7 +160,9 @@ func (c *OIDCConfig) isSubjectAllowed(subject string) bool {
 // since the OIDC spec does not guarantee that access tokens are JWTs.
 //
 // On success, the token is cached locally under sessions so that subsequent requests using the same token don't need
-// to reach out to the provider again until the token's TTL expires.
+// to reach out to the provider again for as long as the cached entry remains valid. The cache TTL never outlives
+// the token itself: for ID tokens, it's capped by the token's own "exp" claim; for opaque access tokens, whose
+// expiry Gatus has no way to inspect, a short fixed TTL is used instead.
 func (c *OIDCConfig) ValidateBearerToken(ctx context.Context, token string) bool {
 	if len(token) == 0 || c.verifier == nil || c.provider == nil {
 		return false
@@ -162,8 +170,10 @@ func (c *OIDCConfig) ValidateBearerToken(ctx context.Context, token string) bool
 	ctx, cancel := context.WithTimeout(ctx, bearerTokenValidationTimeout)
 	defer cancel()
 	var subject string
+	var cacheTTL time.Duration
 	if idToken, err := c.verifier.Verify(ctx, token); err == nil {
 		subject = idToken.Subject
+		cacheTTL = minDuration(time.Until(idToken.Expiry), c.SessionTTL)
 	} else {
 		userInfo, err := c.provider.UserInfo(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token}))
 		if err != nil {
@@ -171,13 +181,23 @@ func (c *OIDCConfig) ValidateBearerToken(ctx context.Context, token string) bool
 			return false
 		}
 		subject = userInfo.Subject
+		cacheTTL = minDuration(opaqueAccessTokenCacheTTL, c.SessionTTL)
 	}
 	if !c.isSubjectAllowed(subject) {
 		logr.Debugf("[security.ValidateBearerToken] Subject %s is not in the list of allowed subjects", subject)
 		return false
 	}
-	sessions.SetWithTTL(token, subject, c.SessionTTL)
+	if cacheTTL > 0 {
+		sessions.SetWithTTL(token, subject, cacheTTL)
+	}
 	return true
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (c *OIDCConfig) setSessionCookie(w http.ResponseWriter, idToken *oidc.IDToken) {
