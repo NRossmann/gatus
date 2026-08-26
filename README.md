@@ -2821,6 +2821,10 @@ security:
 
 Confused? Read [Securing Gatus with OIDC using Auth0](https://twin.sh/articles/56/securing-gatus-with-oidc-using-auth0).
 
+In addition to the browser-based login flow, the API also accepts a bearer token obtained directly from the OIDC
+provider (e.g. `Authorization: Bearer <token>`). The token is validated against the provider (using its JWKS for ID
+tokens, or its UserInfo endpoint for opaque access tokens) and, if valid, cached locally until it expires.
+
 
 ### TLS Encryption
 Gatus supports basic encryption with TLS. To enable this, certificate files in PEM format have to be provided.

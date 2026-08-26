@@ -1,8 +1,10 @@
 package security
 
 import (
+	"context"
 	"encoding/base64"
 	"net/http"
+	"strings"
 
 	g8 "github.com/TwiN/g8/v2"
 	"github.com/TwiN/logr"
@@ -52,14 +54,21 @@ func (c *Config) ApplySecurityMiddleware(router fiber.Router) error {
 			if _, exists := sessions.Get(token); exists {
 				return g8.NewClient(token)
 			}
+			// The token isn't backed by a local session yet. This happens when a token was obtained directly from
+			// the OIDC provider (e.g. through a client_credentials or password grant) rather than through Gatus'
+			// own /oidc/login flow, so we validate it against the provider instead.
+			if c.OIDC.ValidateBearerToken(context.Background(), token) {
+				return g8.NewClient(token)
+			}
 			return nil
 		})
 		customTokenExtractorFunc := func(request *http.Request) string {
-			sessionCookie, err := request.Cookie(cookieNameSession)
-			if err != nil {
-				return ""
+			// Prefer the session cookie set by Gatus' own OIDC login flow, but fall back to a bearer token in the
+			// Authorization header so that tokens obtained directly from the OIDC provider are also accepted.
+			if sessionCookie, err := request.Cookie(cookieNameSession); err == nil {
+				return sessionCookie.Value
 			}
-			return sessionCookie.Value
+			return strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
 		}
 		// TODO: g8: Add a way to update cookie after? would need the writer
 		authorizationService := g8.NewAuthorizationService().WithClientProvider(clientProvider)
@@ -103,8 +112,10 @@ func (c *Config) IsAuthenticated(ctx *fiber.Ctx) bool {
 			return false
 		}
 		token := c.gate.ExtractTokenFromRequest(request)
-		_, hasSession := sessions.Get(token)
-		return hasSession
+		if _, hasSession := sessions.Get(token); hasSession {
+			return true
+		}
+		return c.OIDC.ValidateBearerToken(request.Context(), token)
 	}
 	return false
 }

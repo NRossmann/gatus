@@ -165,6 +165,40 @@ func TestConfig_ApplySecurityMiddleware(t *testing.T) {
 		if response.StatusCode != 401 {
 			t.Error("expected code to be 401, but was", response.StatusCode)
 		}
+		// Try with a valid gatus session cookie (i.e. one that was created through the OIDC login flow)
+		sessions.SetWithTTL("valid-session-id", "user1@example.com", DefaultOIDCSessionTTL)
+		request = httptest.NewRequest("GET", "/test", http.NoBody)
+		request.AddCookie(&http.Cookie{Name: cookieNameSession, Value: "valid-session-id"})
+		response, err = app.Test(request)
+		if err != nil {
+			t.Fatal("expected no error, got", err)
+		}
+		if response.StatusCode != 200 {
+			t.Error("expected code to be 200, but was", response.StatusCode)
+		}
+		// Try with a bearer token in the Authorization header that isn't backed by a local session and isn't a
+		// valid token from the OIDC provider's perspective either
+		request = httptest.NewRequest("GET", "/test", http.NoBody)
+		request.Header.Set("Authorization", "Bearer not-a-valid-token")
+		response, err = app.Test(request)
+		if err != nil {
+			t.Fatal("expected no error, got", err)
+		}
+		if response.StatusCode != 401 {
+			t.Error("expected code to be 401, but was", response.StatusCode)
+		}
+		// Try with a bearer token in the Authorization header that is backed by a local session
+		// (i.e. it was already validated against the OIDC provider on a previous request)
+		sessions.SetWithTTL("previously-validated-bearer-token", "user1@example.com", DefaultOIDCSessionTTL)
+		request = httptest.NewRequest("GET", "/test", http.NoBody)
+		request.Header.Set("Authorization", "Bearer previously-validated-bearer-token")
+		response, err = app.Test(request)
+		if err != nil {
+			t.Fatal("expected no error, got", err)
+		}
+		if response.StatusCode != 200 {
+			t.Error("expected code to be 200, but was", response.StatusCode)
+		}
 	})
 }
 

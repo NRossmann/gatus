@@ -15,6 +15,10 @@ import (
 
 const (
 	DefaultOIDCSessionTTL = 8 * time.Hour
+
+	// bearerTokenValidationTimeout bounds how long a request may block while a bearer token that isn't already
+	// cached locally is validated against the OIDC provider (JWKS or UserInfo endpoint).
+	bearerTokenValidationTimeout = 10 * time.Second
 )
 
 // OIDCConfig is the configuration for OIDC authentication
@@ -28,6 +32,7 @@ type OIDCConfig struct {
 	SessionTTL      time.Duration `yaml:"session-ttl"`      // e.g. 8h. Defaults to 8 hours
 
 	oauth2Config oauth2.Config
+	provider     *oidc.Provider
 	verifier     *oidc.IDTokenVerifier
 }
 
@@ -44,6 +49,7 @@ func (c *OIDCConfig) initialize() error {
 	if err != nil {
 		return err
 	}
+	c.provider = provider
 	c.verifier = provider.Verifier(&oidc.Config{ClientID: c.ClientID})
 	// Configure an OpenID Connect aware OAuth2 client.
 	c.oauth2Config = oauth2.Config{
@@ -119,21 +125,59 @@ func (c *OIDCConfig) callbackHandler(w http.ResponseWriter, r *http.Request) { /
 		http.Error(w, "nonce did not match", http.StatusBadRequest)
 		return
 	}
-	if len(c.AllowedSubjects) == 0 {
-		// If there's no allowed subjects, all subjects are allowed.
-		c.setSessionCookie(w, idToken)
-		http.Redirect(w, r, "/", http.StatusFound)
+	if !c.isSubjectAllowed(idToken.Subject) {
+		logr.Debugf("[security.callbackHandler] Subject %s is not in the list of allowed subjects", idToken.Subject)
+		http.Redirect(w, r, "/?error=access_denied", http.StatusFound)
 		return
 	}
-	for _, subject := range c.AllowedSubjects {
-		if strings.ToLower(subject) == strings.ToLower(idToken.Subject) {
-			c.setSessionCookie(w, idToken)
-			http.Redirect(w, r, "/", http.StatusFound)
-			return
+	c.setSessionCookie(w, idToken)
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// isSubjectAllowed returns whether the given subject is allowed to authenticate.
+// If AllowedSubjects is empty, all subjects are allowed.
+func (c *OIDCConfig) isSubjectAllowed(subject string) bool {
+	if len(c.AllowedSubjects) == 0 {
+		return true
+	}
+	for _, allowedSubject := range c.AllowedSubjects {
+		if strings.EqualFold(allowedSubject, subject) {
+			return true
 		}
 	}
-	logr.Debugf("[security.callbackHandler] Subject %s is not in the list of allowed subjects", idToken.Subject)
-	http.Redirect(w, r, "/?error=access_denied", http.StatusFound)
+	return false
+}
+
+// ValidateBearerToken validates a bearer token that was obtained directly from the OIDC provider (i.e. not through
+// Gatus' own login flow) and thus isn't already backed by a local session. ID tokens (JWTs) are validated locally
+// using the provider's JWKS, while opaque access tokens are validated by calling the provider's UserInfo endpoint,
+// since the OIDC spec does not guarantee that access tokens are JWTs.
+//
+// On success, the token is cached locally under sessions so that subsequent requests using the same token don't need
+// to reach out to the provider again until the token's TTL expires.
+func (c *OIDCConfig) ValidateBearerToken(ctx context.Context, token string) bool {
+	if len(token) == 0 || c.verifier == nil || c.provider == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, bearerTokenValidationTimeout)
+	defer cancel()
+	var subject string
+	if idToken, err := c.verifier.Verify(ctx, token); err == nil {
+		subject = idToken.Subject
+	} else {
+		userInfo, err := c.provider.UserInfo(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token}))
+		if err != nil {
+			logr.Debugf("[security.ValidateBearerToken] Failed to validate bearer token: %s", err.Error())
+			return false
+		}
+		subject = userInfo.Subject
+	}
+	if !c.isSubjectAllowed(subject) {
+		logr.Debugf("[security.ValidateBearerToken] Subject %s is not in the list of allowed subjects", subject)
+		return false
+	}
+	sessions.SetWithTTL(token, subject, c.SessionTTL)
+	return true
 }
 
 func (c *OIDCConfig) setSessionCookie(w http.ResponseWriter, idToken *oidc.IDToken) {
