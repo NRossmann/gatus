@@ -1,5 +1,5 @@
 # Build the go application into a binary
-FROM golang:alpine AS builder
+FROM golang:1.26.3-alpine AS builder
 RUN apk --update add ca-certificates
 WORKDIR /app
 COPY . ./
